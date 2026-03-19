@@ -1,119 +1,108 @@
 import os
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 import torch
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-from langchain_core.prompts import PromptTemplate  # Updated import per deprecation notice
-from langchain.chains import RetrievalQA
-from langchain_community.embeddings import HuggingFaceInstructEmbeddings  # New import path
-from langchain_community.document_loaders import PyPDFLoader  # New import path
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma  # New import path
-from langchain_ibm import WatsonxLLM
+from langchain_community.vectorstores import Chroma
+from langchain.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# Check for GPU availability and set the appropriate device for computation.
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-# Global variables
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
 conversation_retrieval_chain = None
 chat_history = []
-llm_hub = None
-embeddings = None
 
-# Function to initialize the language model and its embeddings
 def init_llm():
     global llm_hub, embeddings
-
-    logger.info("Initializing WatsonxLLM and embeddings...")
-
-    # Llama Model Configuration
-    MODEL_ID = "meta-llama/llama-3-3-70b-instruct"
-    WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
-    PROJECT_ID = "skills-network"
-
-    # Use the same parameters as before:
-    #   MAX_NEW_TOKENS: 256, TEMPERATURE: 0.1
-    model_parameters = {
-        # "decoding_method": "greedy",
-        "max_new_tokens": 256,
-        "temperature": 0.1,
-    }
-
-    # Initialize Llama LLM using the updated WatsonxLLM API
-    llm_hub = WatsonxLLM(
-        model_id=MODEL_ID,
-        url=WATSONX_URL,
-        project_id=PROJECT_ID,
-        params=model_parameters
-    )
-    logger.debug("WatsonxLLM initialized: %s", llm_hub)
-
-    #Initialize embeddings using a pre-trained model to represent the text data.
-    embeddings =  # create object of Hugging Face Instruct Embeddings with (model_name,  model_kwargs={"device": DEVICE} )
     
-    logger.debug("Embeddings initialized with model device: %s", DEVICE)
+    print("Initializing Groq LLM and Embeddings......")
+    
+    MODEL_NAME = "llama-3.3-70b-versatile"  # Recommended replacement
+    
+    model_parameters = {
+        "temperature":0.1,
+        "max_tokens": 256,
+    }
+    
+    llm_hub = ChatGroq(
+        api_key=GROQ_API_KEY,
+        model=MODEL_NAME,
+        **model_parameters
+    )
+    
+    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    
+    embeddings = HuggingFaceEmbeddings(
+        model_name = EMBEDDING_MODEL,
+        model_kwargs = {"device":"cuda" if torch.cuda.is_available() else "cpu"}
+    )
+    
+    return llm_hub, embeddings
 
-# Function to process a PDF document
+# Function to process a PDF document using PYPDFLoader
+
 def process_document(document_path):
     global conversation_retrieval_chain
-
-    logger.info("Loading document from path: %s", document_path)
-    # Load the document
-    loader =  # ---> use PyPDFLoader and document_path from the function input parameter <---
-    documents = loader.load()
-    logger.debug("Loaded %d document(s)", len(documents))
-
-    # Split the document into chunks, set chunk_size=1024, and chunk_overlap=64. assign it to variable text_splitter
-    text_splitter = # ---> use Recursive Character TextSplitter and specify the input parameters <---
-    texts = text_splitter.split_documents(documents)
-    logger.debug("Document split into %d text chunks", len(texts))
-
-    # Create an embeddings database using Chroma from the split text chunks.
-    logger.info("Initializing Chroma vector store from documents...")
-    db = Chroma.from_documents(texts, embedding=embeddings)
-    logger.debug("Chroma vector store initialized.")
-
-    # Optional: Log available collections if accessible (this may be internal API)
-    try:
-        collections = db._client.list_collections()  # _client is internal; adjust if needed
-        logger.debug("Available collections in Chroma: %s", collections)
-    except Exception as e:
-        logger.warning("Could not retrieve collections from Chroma: %s", e)
-
-    # Build the QA chain, which utilizes the LLM and retriever for answering questions. 
-    conversation_retrieval_chain = RetrievalQA.from_chain_type(
-        llm=llm_hub,
-        chain_type="stuff",
-        retriever=db.as_retriever(search_type="mmr", search_kwargs={'k': 6, 'lambda_mult': 0.25}),
-        return_source_documents=False,
-        input_key="question"
-        # chain_type_kwargs={"prompt": prompt}  # if you are using a prompt template, uncomment this part
-    )
-    logger.info("RetrievalQA chain created successfully.")
     
-# Function to process a user prompt
+    #load the document
+    loader = PyPDFLoader(document_path)
+    documents = loader.load()
+    
+    ##pslit the documents into chunks
+    text_splitters = RecursiveCharacterTextSplitter(chunk_size=1064, chunk_overlap=160)
+    texts = text_splitters.split_documents(documents)
+    
+    #vectorize the documents using Chroma vector store
+    db = Chroma.from_documents(texts, embedding=embeddings)
+    
+    prompt = ChatPromptTemplate.from_template("""
+                    You are a helpful assistant analyzing PDF documents.
+                    Use ONLY the provided context to answer. Be concise.
+
+                    Context: {context}
+                    Question: {input}
+                    Answer:""")
+    
+    #stuff chain
+    stuff_chain = create_stuff_documents_chain(llm=llm_hub, prompt=prompt)
+    
+    #create RAG Chain
+    conversation_retrieval_chain = create_retrieval_chain(
+        retriever = db.as_retriever(search_type='mmr', search_kwargs={"k":6}),
+        combine_docs_chain = stuff_chain,
+    )
+    
 def process_prompt(prompt):
     global conversation_retrieval_chain
     global chat_history
-
-    logger.info("Processing prompt: %s", prompt)
-    # Query the model using the new .invoke() method
-    output = conversation_retrieval_chain.invoke({"question": prompt, "chat_history": chat_history})
-    answer = output["result"]
-    logger.debug("Model response: %s", answer)
-
-    # Update the chat history
-    # TODO: Append the prompt and the bot's response to the chat history using chat_history.append and pass `prompt` `answer` as arguments
-    # --> write your code here <--	
     
-    logger.debug("Chat history updated. Total exchanges: %d", len(chat_history))
-
-    # Return the model's response
+    #query the model using the new .invoke() method
+    
+    output = conversation_retrieval_chain.invoke({"input": prompt, "chat_history":chat_history})
+    answer = output["answer"]
+    
+    #update chat_history
+    
+    chat_history.append((prompt, answer))
     return answer
 
-# Initialize the language model
 init_llm()
-logger.info("LLM and embeddings initialization complete.")
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
