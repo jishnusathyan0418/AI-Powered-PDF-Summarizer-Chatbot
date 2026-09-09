@@ -1,55 +1,80 @@
 import logging
 import os
+import tempfile
+
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-import worker  # Import the worker module
+from werkzeug.exceptions import RequestEntityTooLarge
+import worker
 
-# Initialize Flask app and CORS
 app = Flask(__name__)
-cors = CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r'/*': {'origins': '*'}})
+app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024
 app.logger.setLevel(logging.ERROR)
 
-# Define the route for the index page
+
 @app.route('/', methods=['GET'])
 def index():
-    return render_template('index.html')  # Render the index.html template
+    return render_template('index.html')
 
-# Define the route for processing messages
+
 @app.route('/process-message', methods=['POST'])
 def process_message_route():
-    user_message = request.json['userMessage']  # Extract the user's message from the request
-    print('user_message', user_message)
+    payload = request.get_json(silent=True)
+    message = payload.get('userMessage') if isinstance(payload, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        return jsonify(botResponse='Please enter a non-empty question.'), 400
+    try:
+        answer = worker.process_prompt(message.strip())
+        return jsonify(botResponse=answer), 200
+    except ValueError as exc:
+        return jsonify(botResponse=str(exc)), 400
+    except RuntimeError as exc:
+        return jsonify(botResponse=str(exc)), 503
+    except Exception as exc:
+        app.logger.error('Answer generation failed (%s)', type(exc).__name__)
+        return jsonify(botResponse='Unable to generate an answer. Check the Groq API key, service availability, and network connection.'), 502
 
-    bot_response = worker.process_prompt(user_message)  # Process the user's message using the worker module
 
-    # Return the bot's response as JSON
-    return jsonify({
-        "botResponse": bot_response
-    }), 200
-
-# Define the route for processing documents
 @app.route('/process-document', methods=['POST'])
 def process_document_route():
-    # Check if a file was uploaded
-    if 'file' not in request.files:
-        return jsonify({
-            "botResponse": "It seems like the file was not uploaded correctly, can you try "
-                           "again. If the problem persists, try using a different file"
-        }), 400
+    file = request.files.get('file')
+    if file is None or not file.filename:
+        return jsonify(botResponse='Please select a PDF file to upload.'), 400
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify(botResponse='Only PDF files are supported.'), 400
+    file_path = None
+    try:
+        # Never use an uploaded filename as a filesystem destination.
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp:
+            file_path = temp.name
+        file.save(file_path)
+        with open(file_path, 'rb') as uploaded:
+            if b'%PDF-' not in uploaded.read(1024):
+                return jsonify(botResponse='This file is not a valid PDF.'), 400
+        worker.process_document(file_path)
+        return jsonify(botResponse='Your PDF is ready. You can now ask questions about it!'), 200
+    except ValueError as exc:
+        return jsonify(botResponse=str(exc)), 400
+    except Exception as exc:
+        app.logger.error('Document processing failed (%s)', type(exc).__name__)
+        return jsonify(botResponse='Unable to process this PDF. Check that it is readable and not password-protected, and that the embedding model can be loaded.'), 422
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
-    file = request.files['file']  # Extract the uploaded file from the request
 
-    file_path = file.filename  # Define the path where the file will be saved
-    file.save(file_path)  # Save the file
+@app.route('/reset', methods=['POST'])
+def reset_route():
+    worker.reset_document()
+    return jsonify(botResponse='Chat reset. Please upload a PDF.'), 200
 
-    worker.process_document(file_path)  # Process the document using the worker module
 
-    # Return a success message as JSON
-    return jsonify({
-        "botResponse": "Thank you for providing your PDF document. I have analyzed it, so now you can ask me any "
-                       "questions regarding it!"
-    }), 200
+@app.errorhandler(RequestEntityTooLarge)
+def upload_too_large(error):
+    return jsonify(botResponse='The upload exceeds the 20 MB limit.'), 413
 
-# Run the Flask app
-if __name__ == "__main__":
-    app.run(debug=True, port=8000, host='0.0.0.0')
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', '8000'))
+    app.run(debug=False, port=port, host='0.0.0.0')

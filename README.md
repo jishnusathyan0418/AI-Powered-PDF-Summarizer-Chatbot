@@ -1,12 +1,74 @@
-PDF Insight: AI-Powered RAG ChatbotAn intelligent document interaction system that allows users to upload PDF files and get instant summaries or answers to specific questions. 
-This project utilizes Retrieval-Augmented Generation (RAG) to ensure responses are grounded in the actual content of the uploaded documents.
-🚀 FeaturesHigh-Speed Inference: Uses Groq Cloud for near-instantaneous LLM responses.Semantic Search: Implements ChromaDB and HuggingFace Embeddings to find contextually relevant information.Smart Parsing: Handles large PDFs by splitting text into recursive chunks to maintain context.Web Interface: A responsive Flask-based backend with a clean API for frontend integration.
-🛠️ Tech StackComponentTechnologyLLM OrchestrationLangChainInference EngineChatGroq (Llama/Mixtral)Vector DatabaseChromaDBEmbeddingsHuggingFace (Sentence-Transformers)BackendFlask & Flask-CORSEnvironmentPyTorch & Python-Dotenv🏗️ ArchitectureData Loading: PyPDFLoader extracts raw text from PDF files.Chunking: RecursiveCharacterTextSplitter breaks text into segments (e.g., 1000 characters) with overlap to preserve meaning.Embedding: Text chunks are converted into vectors using HuggingFaceEmbeddings.Storage: Vectors are stored in a local Chroma vector store.Retrieval & Chain: A create_retrieval_chain combines the user query with relevant document chunks and sends them to the Groq LLM via a ChatPromptTemplate.
-⚙️ Installation & SetupClone the repository:Bashgit clone https://github.com/your-username/pdf-rag-chatbot.git
-cd pdf-rag-chatbot
-Set up a virtual environment:Bashpython -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-Install dependencies:Bashpip install -r requirements.txt
-Environment Variables:Create a .env file in the root directory and add your API keys:Code snippetGROQ_API_KEY=your_groq_api_key_here
-Run the Application:Bashpython app.py
-📖 UsageUpload: Submit a PDF through the interface.Ask: Enter a query like "Summarize the main points of this document" or "What does section 3.2 say about revenue?"Response: The chatbot retrieves the specific data from the PDF and provides a cited answer.
+# PDF Insight: PDF question-answering chatbot
+
+A local Flask application that extracts PDF text, splits it into overlapping chunks,
+embeds those chunks with Hugging Face MiniLM, and retrieves relevant passages from
+Chroma. LangChain supplies the retrieved text to Llama 3.3 70B through Groq.
+
+## Run locally (Windows PowerShell)
+
+Python 3.11 was selected for the local test environment. For this Google Drive
+workspace, use the launcher to keep dependencies on the local disk:
+
+```powershell
+.\run-local.ps1 -Install
+# Later starts:
+.\run-local.ps1
+```
+
+The launcher uses `%TEMP%\pdf-insight-venv-311`.
+Open http://127.0.0.1:8000.
+
+For generated answers, create an ignored `.env` file in this project directory with
+`GROQ_API_KEY` set to your own Groq API key. Do not commit or share the key. The web
+page and PDF indexing can work without a key; answer requests explain when it is
+missing. The first PDF upload downloads the MiniLM embedding model and needs an
+internet connection. Generating answers also requires internet access to Groq.
+
+Upload a text-based PDF, wait for the ready message, and ask a question. Reset clears
+the active document and lets you upload another. Uploads are limited to 20 MB.
+
+## Active files and settings
+
+- `server.py`: Flask routes, temporary uploads, validation, and JSON responses.
+- `worker.py`: PDF extraction, embeddings, Chroma retrieval, and the Groq LLM.
+- `templates/index.html`, `static/script.js`, `static/style.css`: browser interface.
+- Chunk size: 1064 characters; target overlap: 160 characters.
+- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`, local CPU or available CUDA.
+- Retrieval: MMR, up to 6 chunks.
+- Generation: `openai/gpt-oss-120b` by default, configurable with `GROQ_MODEL`, temperature 0.1, output limit 256 tokens.
+
+The other worker and exercise files are alternative examples, not imported by
+`server.py`.
+
+## Local checks
+
+```powershell
+& (Join-Path $env:TEMP 'pdf-insight-venv-311\Scripts\python.exe') -m unittest discover -s tests -v
+node --check static/script.js
+```
+
+The integration checks use actual generated PDFs, the real MiniLM embedding model,
+and Chroma retrieval. Answer-generation checks substitute a fake chat model; they
+do not demonstrate that a live Groq request succeeds and do not require an API key.
+
+## Current limitations
+
+This is a single-user local demo. Document state is global to the server process,
+not isolated by user or browser session. The index is not configured for persistence.
+Conversation history is recorded but is not used to resolve follow-up questions.
+Answers do not include explicit page citations. A request to summarize uses retrieved
+excerpts, so it is not guaranteed to cover the whole PDF. Image-only scans require
+OCR, which is not implemented. Context instructions do not guarantee factual answers.
+
+For the optional Edge browser smoke test, start the app in another terminal, then:
+
+```powershell
+$taskPython = Join-Path $env:TEMP 'pdf-insight-venv-311\Scripts\python.exe'
+& $taskPython -m pip install -r requirements-dev.txt
+& $taskPython tests\browser_smoke.py
+```
+
+This test uses a generated sample handbook. If a Groq key is configured, it checks
+live answers against two known facts. Otherwise, it verifies the missing-key error
+and explicitly reports the live-answer test as blocked. A separate simulated
+response checks safe text rendering only. Browser artifacts are saved in `.cache/`.
