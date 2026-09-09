@@ -1,204 +1,145 @@
-let lightMode = true;
-let recorder = null;
-let recording = false;
-const responses = [];
-const botRepeatButtonIDToIndexMap = {};
-const userRepeatButtonIDToRecordingMap = {};
-const baseUrl = window.location.origin
+document.addEventListener('DOMContentLoaded', () => {
+  const messages = document.getElementById('message-list');
+  const input = document.getElementById('message-input');
+  const send = document.getElementById('send-button');
+  const reset = document.getElementById('reset-button');
+  const loading = document.querySelector('.loading-animation');
+  let ready = false;
+  let busy = false;
+  let lightMode = true;
 
-async function showBotLoadingAnimation() {
-  await sleep(200);
-  $(".loading-animation")[1].style.display = "inline-block";
-  document.getElementById('send-button').disabled = true;
-}
-
-function hideBotLoadingAnimation() {
-  $(".loading-animation")[1].style.display = "none";
-  if(!isFirstMessage){
-    document.getElementById('send-button').disabled = false;
-  }
-}
-
-async function showUserLoadingAnimation() {
-  await sleep(100);
-  $(".loading-animation")[0].style.display = "flex";
-}
-
-function hideUserLoadingAnimation() {
-  $(".loading-animation")[0].style.display = "none";
-}
-
-
-const processUserMessage = async (userMessage) => {
-  let response = await fetch(baseUrl + "/process-message", {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ userMessage: userMessage }),
-  });
-  response = await response.json();
-  console.log(response);
-  return response;
-};
-
-const cleanTextInput = (value) => {
-  return value
-    .trim() // remove starting and ending spaces
-    .replace(/[\n\t]/g, "") // remove newlines and tabs
-    .replace(/<[^>]*>/g, "") // remove HTML tags
-    .replace(/[<>&;]/g, ""); // sanitize inputs
-};
-
-const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
-
-const scrollToBottom = () => {
-  // Scroll the chat window to the bottom
-  $("#chat-window").animate({
-    scrollTop: $("#chat-window")[0].scrollHeight,
-  });
-};
-
-const populateUserMessage = (userMessage, userRecording) => {
-  // Clear the input field
-  $("#message-input").val("");
-
-  // Append the user's message to the message list
-    $("#message-list").append(
-      `<div class='message-line my-text'><div class='message-box my-text${
-        !lightMode ? " dark" : ""
-      }'><div class='me'>${userMessage}</div></div></div>`
-    );
-
-  scrollToBottom();
-};
-
-let isFirstMessage = true;
-
-const populateBotResponse = async (userMessage) => {
-  await showBotLoadingAnimation();
-
-  let response;
-  let uploadButtonHtml = '';
-
-  if (isFirstMessage) {
-    response = { botResponse: "Hello there! I'm your friendly data assistant, ready to answer any questions regarding your data. Could you please upload a PDF file for me to analyze?"};
-    uploadButtonHtml = `
-        <input type="file" id="file-upload" accept=".pdf" hidden>
-        <button id="upload-button" class="btn btn-primary btn-sm">Upload File</button>
-    `;
-
-  } else {
-    response = await processUserMessage(userMessage);
+  function setBusy(value) {
+    busy = value;
+    loading.style.display = value ? 'inline-block' : 'none';
+    send.disabled = value || !ready;
+    input.disabled = value || !ready;
+    reset.disabled = value;
+    const upload = document.getElementById('upload-button');
+    if (upload) upload.disabled = value || ready;
+    document.getElementById('upload-status').textContent = value && !ready ? 'Reading your document...' : ready ? 'Document ready to explore' : 'Waiting for a document';
   }
 
-  renderBotResponse(response, uploadButtonHtml)
-
-  // Event listener for file upload
-  if (isFirstMessage) {
-    $("#upload-button").on("click", function () {
-      $("#file-upload").click();
-    });
-
-    $("#file-upload").on("change", async function () {
-      const file = this.files[0];
-
-      await showBotLoadingAnimation();
-
-      // Create a new FormData instance
-      const formData = new FormData();
-
-      // Append the file to the FormData instance
-      formData.append('file', file);
-
-      // Now send this data to /process-document endpoint
-      let response = await fetch(baseUrl + "/process-document", {
-        method: "POST",
-        headers: { Accept: "application/json" }, // "Content-Type" should not be explicitly set here, the browser will automatically set it to "multipart/form-data"
-        body: formData, // send the FormData instance as the body
-      });
-
-      if (response.status !== 400) {
-           document.querySelector('#upload-button').disabled = true;
-      }
-
-      response = await response.json();
-      console.log('/process-document', response)
-      renderBotResponse(response, '')
-    });
-
-
-    isFirstMessage = false; // after the first message, set this to false
-  }
-};
-
-const renderBotResponse = (response, uploadButtonHtml) => {
-  responses.push(response);
-
-  hideBotLoadingAnimation();
-
-  $("#message-list").append(
-    `<div class='message-line'><div class='message-box${!lightMode ? " dark" : ""}'>${response.botResponse.trim()}<br>${uploadButtonHtml}</div></div>`
-  );
-
-  scrollToBottom();
-}
-
-populateBotResponse()
-
-
-$(document).ready(function () {
-
-  //start the chat with send button disabled
-  document.getElementById('send-button').disabled = true;
-
-  // Listen for the "Enter" key being pressed in the input field
-  $("#message-input").keyup(function (event) {
-    let inputVal = cleanTextInput($("#message-input").val());
-
-    if (event.keyCode === 13 && inputVal != "") {
-      const message = inputVal;
-
-      populateUserMessage(message, null);
-      populateBotResponse(message);
+  function appendMessage(text, user = false) {
+    const line = document.createElement('div');
+    line.className = 'message-line' + (user ? ' my-text' : '');
+    const box = document.createElement('div');
+    box.className = 'message-box' + (user ? ' my-text' : '') + (!lightMode ? ' dark' : '') + (!user ? ' assistant-message' : '');
+    if (user) {
+      box.textContent = text;
+    } else {
+      box.innerHTML = formatAssistantText(text);
     }
+    line.appendChild(box);
+    messages.appendChild(line);
+    const chat = document.getElementById('chat-window');
+    chat.scrollTop = chat.scrollHeight;
+    return box;
+  }
 
-    inputVal = $("#message-input").val();
-  });
+  function formatAssistantText(text) {
+    const escaped = String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+    return escaped
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/^\s*[-*]\s+/gm, '• ')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__(.+?)__/g, '<strong>$1</strong>')
+      .replace(/`{1,3}/g, '')
+      .replace(/\n/g, '<br>');
+  }
 
-  // When the user clicks the "Send" button
-  $("#send-button").click(async function () {
-  // Get the message the user typed in
-  const message = cleanTextInput($("#message-input").val());
+  async function callApi(path, options) {
+    const response = await fetch(path, options);
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error('The server returned an unreadable response. Please try again.');
+    }
+    if (!response.ok) throw new Error(data.botResponse || 'The request failed. Please try again.');
+    return data.botResponse;
+  }
 
-  populateUserMessage(message, null);
-  populateBotResponse(message);
-
-  });
-
-  //reset chat
-  // When the user clicks the "Reset" button
-    $("#reset-button").click(async function () {
-      // Clear the message list
-      $("#message-list").empty();
-
-      // Reset the responses array
-      responses.length = 0;
-
-      // Reset isFirstMessage flag
-      isFirstMessage = true;
-
-      document.querySelector('#upload-button').disabled = false;
-
-      // Start over
-      populateBotResponse();
+  function showWelcome() {
+    appendMessage('Upload a PDF to get started. Once it is ready, ask me for a summary or any detail you want to find.');
+    const fileInput = document.getElementById('file-upload');
+    const upload = document.getElementById('upload-button');
+    upload.onclick = () => fileInput.click();
+    if (fileInput.dataset.bound === 'true') {
+      setBusy(false);
+      return;
+    }
+    fileInput.dataset.bound = 'true';
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files[0];
+      if (!file || busy) return;
+      setBusy(true);
+      const body = new FormData();
+      body.append('file', file);
+      try {
+        appendMessage(await callApi('/process-document', { method: 'POST', body }));
+        ready = true;
+      } catch (error) {
+        appendMessage(error.message);
+        fileInput.value = '';
+      } finally {
+        setBusy(false);
+        if (ready) input.focus();
+      }
     });
+    setBusy(false);
+  }
 
+  async function sendMessage() {
+    const message = input.value.trim();
+    if (!message || busy || !ready) return;
+    appendMessage(message, true);
+    input.value = '';
+    setBusy(true);
+    try {
+      appendMessage(await callApi('/process-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userMessage: message }),
+      }));
+    } catch (error) {
+      appendMessage(error.message);
+    } finally {
+      setBusy(false);
+      input.focus();
+    }
+  }
 
-  // handle the event of switching light-dark mode
-  $("#light-dark-mode-switch").change(function () {
-    $("body").toggleClass("dark-mode");
-    $(".message-box").toggleClass("dark");
-    $(".loading-dots").toggleClass("dark");
-    $(".dot").toggleClass("dark-dot");
-    lightMode = !lightMode;
+  send.addEventListener('click', sendMessage);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      sendMessage();
+    }
   });
+  reset.addEventListener('click', async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await callApi('/reset', { method: 'POST' });
+      ready = false;
+      messages.replaceChildren();
+      input.value = '';
+      showWelcome();
+    } catch (error) {
+      appendMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  });
+  document.getElementById('light-dark-mode-switch').addEventListener('change', () => {
+    lightMode = !lightMode;
+    document.body.classList.toggle('dark-mode', !lightMode);
+    document.querySelectorAll('.message-box').forEach(box => box.classList.toggle('dark', !lightMode));
+  });
+  showWelcome();
 });
