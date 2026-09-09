@@ -1,8 +1,9 @@
 # PDF Insight: PDF question-answering chatbot
 
 A local Flask application that extracts PDF text, splits it into overlapping chunks,
-embeds those chunks with Hugging Face MiniLM, and retrieves relevant passages from
-Chroma. LangChain supplies the retrieved text to Llama 3.3 70B through Groq.
+retrieves relevant passages with a lightweight in-memory TF-IDF index, and sends the
+retrieved context to Groq. The lightweight index avoids downloading large ML models,
+which makes the app suitable for free hosting plans with limited memory.
 
 ## Run locally (Windows PowerShell)
 
@@ -21,8 +22,7 @@ Open http://127.0.0.1:8000.
 For generated answers, create an ignored `.env` file in this project directory with
 `GROQ_API_KEY` set to your own Groq API key. Do not commit or share the key. The web
 page and PDF indexing can work without a key; answer requests explain when it is
-missing. The first PDF upload downloads the MiniLM embedding model and needs an
-internet connection. Generating answers also requires internet access to Groq.
+missing. Generating answers requires internet access to Groq.
 
 Upload a text-based PDF, wait for the ready message, and ask a question. Reset clears
 the active document and lets you upload another. Uploads are limited to 20 MB.
@@ -30,11 +30,10 @@ the active document and lets you upload another. Uploads are limited to 20 MB.
 ## Active files and settings
 
 - `server.py`: Flask routes, temporary uploads, validation, and JSON responses.
-- `worker.py`: PDF extraction, embeddings, Chroma retrieval, and the Groq LLM.
+- `worker.py`: PDF extraction, lightweight TF-IDF retrieval, and the Groq LLM.
 - `templates/index.html`, `static/script.js`, `static/style.css`: browser interface.
 - Chunk size: 1064 characters; target overlap: 160 characters.
-- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`, local CPU or available CUDA.
-- Retrieval: MMR, up to 6 chunks.
+- Retrieval: TF-IDF cosine similarity, up to 6 chunks.
 - Generation: `openai/gpt-oss-120b` by default, configurable with `GROQ_MODEL`, temperature 0.1, output limit 256 tokens.
 
 The other worker and exercise files are alternative examples, not imported by
@@ -47,8 +46,8 @@ The other worker and exercise files are alternative examples, not imported by
 node --check static/script.js
 ```
 
-The integration checks use actual generated PDFs, the real MiniLM embedding model,
-and Chroma retrieval. Answer-generation checks substitute a fake chat model; they
+The integration checks use actual generated PDFs and real TF-IDF retrieval.
+Answer-generation checks substitute a fake chat model; they
 do not demonstrate that a live Groq request succeeds and do not require an API key.
 
 ## Current limitations
