@@ -1,16 +1,15 @@
 """Document retrieval for the local, single-user PDF chatbot."""
 import os
+import math
+import re
 from pathlib import Path
-from uuid import uuid4
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
-import torch
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from chromadb.config import Settings
 from langchain.prompts import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -25,14 +24,76 @@ embeddings = None
 db = None
 
 
-def init_embeddings():
-    global embeddings
-    if embeddings is None:
-        embeddings = HuggingFaceEmbeddings(
-            model_name='sentence-transformers/all-MiniLM-L6-v2',
-            model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
+def _tokens(text):
+    return re.findall(r'[a-z0-9]+', text.lower())
+
+
+class TfidfRetriever(BaseRetriever):
+    documents: list[Document]
+    vectors: list[dict[str, float]]
+    idf: dict[str, float]
+    k: int = 6
+
+    def _get_relevant_documents(self, query, *, run_manager=None):
+        query_counts = {}
+        for token in _tokens(query):
+            query_counts[token] = query_counts.get(token, 0) + 1
+        query_vector = {
+            token: count * self.idf.get(token, 0.0)
+            for token, count in query_counts.items()
+            if token in self.idf
+        }
+        query_norm = math.sqrt(sum(value * value for value in query_vector.values()))
+        if query_norm == 0:
+            return self.documents[:self.k]
+
+        scored = []
+        for index, vector in enumerate(self.vectors):
+            dot = sum(query_vector.get(token, 0.0) * value for token, value in vector.items())
+            document_norm = math.sqrt(sum(value * value for value in vector.values()))
+            score = dot / (query_norm * document_norm) if document_norm else 0.0
+            scored.append((score, index))
+        scored.sort(reverse=True)
+        return [self.documents[index] for score, index in scored[:self.k] if score > 0] or self.documents[:self.k]
+
+
+class TfidfDocumentStore:
+    def __init__(self, documents):
+        self.documents = documents
+        document_frequency = {}
+        term_counts = []
+        for document in documents:
+            counts = {}
+            for token in _tokens(document.page_content):
+                counts[token] = counts.get(token, 0) + 1
+            term_counts.append(counts)
+            for token in counts:
+                document_frequency[token] = document_frequency.get(token, 0) + 1
+
+        document_count = max(len(documents), 1)
+        self.idf = {
+            token: math.log((1 + document_count) / (1 + frequency)) + 1
+            for token, frequency in document_frequency.items()
+        }
+        self.vectors = [
+            {token: count * self.idf[token] for token, count in counts.items()}
+            for counts in term_counts
+        ]
+
+    def as_retriever(self, search_type=None, search_kwargs=None):
+        options = search_kwargs or {}
+        return TfidfRetriever(
+            documents=self.documents,
+            vectors=self.vectors,
+            idf=self.idf,
+            k=options.get('k', 6),
         )
-    return embeddings
+
+    def get(self):
+        return {'documents': [document.page_content for document in self.documents]}
+
+    def delete_collection(self):
+        return None
 
 
 def init_llm():
@@ -69,11 +130,8 @@ def process_document(document_path):
         raise ValueError('No readable text was found. Please upload a text-based PDF; scanned images need OCR.')
     splitter = RecursiveCharacterTextSplitter(chunk_size=1064, chunk_overlap=160)
     texts = splitter.split_documents(documents)
-    new_db = Chroma.from_documents(
-        texts, embedding=init_embeddings(), collection_name='pdf_' + uuid4().hex,
-        client_settings=Settings(anonymized_telemetry=False),
-    )
-    # Each upload has a distinct collection; do not mix it with an earlier PDF.
+    new_db = TfidfDocumentStore(texts)
+    # Each upload has a distinct in-memory index; do not mix it with an earlier PDF.
     reset_document()
     db = new_db
     return len(texts)
